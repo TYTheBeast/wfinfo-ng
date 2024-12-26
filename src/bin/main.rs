@@ -21,10 +21,11 @@ use wfinfo::{
     config::{BestItemMode, InfoDisplayMode},
     database::Database,
     ocr::{
-        extract_part, normalize_string, reward_image_to_reward_names, selection_to_part_name,
-        slop_to_selection, SelectionParams, OCR,
+        normalize_string, reward_image_to_reward_names, selection_to_part_name, slop_to_selection,
+        SelectionParams, OCR,
     },
     utils::fetch_prices_and_items,
+    app_events::AppEvent,
 };
 
 fn run_detection(capturer: &Window, db: &Database, arguments: &Arguments) {
@@ -118,14 +119,6 @@ fn run_snapit(window: &Window, db: &Database, arguments: &Arguments) -> Option<S
     let window_x = window.x();
     let window_y = window.y();
 
-    let cropped = extract_part(
-        &image,
-        (selection.width, selection.height),
-        (selection.x - window_x, selection.y - window_y),
-        arguments.ocr_brightness,
-        arguments.ocr_contrast,
-    );
-
     // Convert the selection to a part name
     let params = SelectionParams {
         abs_x: selection.x,
@@ -145,7 +138,8 @@ fn run_snapit(window: &Window, db: &Database, arguments: &Arguments) -> Option<S
     if let Some(item) = item {
         match arguments.info_display_mode {
             InfoDisplayMode::Minimal => {
-                let volatility = (item.yesterday_vol.saturating_sub(item.today_vol)) as f32 * item.platinum;
+                let volatility =
+                    (item.yesterday_vol.saturating_sub(item.today_vol)) as f32 * item.platinum;
                 let (plat_fmt, ducat_fmt) = match arguments.best_item_mode {
                     BestItemMode::Platinum => ("\x1b[1;32m", "\x1b[0m"),
                     BestItemMode::Ducats => ("\x1b[0m", "\x1b[1;32m"),
@@ -161,8 +155,10 @@ fn run_snapit(window: &Window, db: &Database, arguments: &Arguments) -> Option<S
                 info!(
                     "{}:\n\t{}{}p\x1b[0m, {}{}d\x1b[0m{}",
                     item.drop_name,
-                    plat_fmt, item.platinum,
-                    ducat_fmt, item.ducats as f32 / 10.0,
+                    plat_fmt,
+                    item.platinum,
+                    ducat_fmt,
+                    item.ducats as f32 / 10.0,
                     if arguments.best_item_mode == BestItemMode::Volatility {
                         format!("\n\tVolatility: \x1b[1;32m{}\x1b[0m", volatility)
                     } else {
@@ -171,7 +167,8 @@ fn run_snapit(window: &Window, db: &Database, arguments: &Arguments) -> Option<S
                 );
             }
             InfoDisplayMode::Combined => {
-                let volatility = (item.yesterday_vol.saturating_sub(item.today_vol)) as f32 * item.platinum;
+                let volatility =
+                    (item.yesterday_vol.saturating_sub(item.today_vol)) as f32 * item.platinum;
                 let (plat_fmt, ducat_fmt) = match arguments.best_item_mode {
                     BestItemMode::Platinum => ("\x1b[1;32m", "\x1b[0m"),
                     BestItemMode::Ducats => ("\x1b[0m", "\x1b[1;32m"),
@@ -187,8 +184,10 @@ fn run_snapit(window: &Window, db: &Database, arguments: &Arguments) -> Option<S
                 info!(
                     "{}:\n\tPlatinum: {}{}p\x1b[0m\tDucats: {}{}d\x1b[0m{}",
                     item.drop_name,
-                    plat_fmt, item.platinum,
-                    ducat_fmt, item.ducats as f32 / 10.0,
+                    plat_fmt,
+                    item.platinum,
+                    ducat_fmt,
+                    item.ducats as f32 / 10.0,
                     if arguments.best_item_mode == BestItemMode::Volatility {
                         format!("\n\tVolatility: \x1b[1;32m{}\x1b[0m", volatility)
                     } else {
@@ -197,7 +196,8 @@ fn run_snapit(window: &Window, db: &Database, arguments: &Arguments) -> Option<S
                 );
             }
             InfoDisplayMode::All => {
-                let volatility = (item.yesterday_vol.saturating_sub(item.today_vol)) as f32 * item.platinum;
+                let volatility =
+                    (item.yesterday_vol.saturating_sub(item.today_vol)) as f32 * item.platinum;
                 let (plat_fmt, ducat_fmt) = match arguments.best_item_mode {
                     BestItemMode::Platinum => ("\x1b[1;32m", "\x1b[0m"),
                     BestItemMode::Ducats => ("\x1b[0m", "\x1b[1;32m"),
@@ -232,7 +232,7 @@ fn run_snapit(window: &Window, db: &Database, arguments: &Arguments) -> Option<S
     Some(text)
 }
 
-fn log_watcher(path: PathBuf, event_sender: mpsc::Sender<()>) {
+fn log_watcher(path: PathBuf, event_sender: mpsc::Sender<AppEvent>) {
     debug!("Path: {}", path.display());
     let mut position = File::open(&path)
         .unwrap_or_else(|_| panic!("Couldn't open file {}", path.display()))
@@ -277,7 +277,7 @@ fn log_watcher(path: PathBuf, event_sender: mpsc::Sender<()>) {
                     if reward_screen_detected {
                         info!("Detected, waiting...");
                         sleep(Duration::from_millis(1500));
-                        event_sender.send(()).unwrap();
+                        event_sender.send(AppEvent::LogTrigger).unwrap();
                     }
 
                     position = f.metadata().unwrap().len();
@@ -287,6 +287,37 @@ fn log_watcher(path: PathBuf, event_sender: mpsc::Sender<()>) {
                 Err(err) => {
                     error!("Error: {:?}", err);
                 }
+            }
+        }
+    });
+}
+
+fn setup_hotkeys(
+    detection_hotkey: HotKey,
+    snapit_hotkey: HotKey,
+    event_sender: mpsc::Sender<AppEvent>,
+) {
+    debug!("Setting up hotkeys");
+    thread::spawn(move || {
+        let manager = GlobalHotKeyManager::new().unwrap();
+        
+        manager.register(detection_hotkey).unwrap();
+        manager.register(snapit_hotkey).unwrap();
+
+        let event_receiver = GlobalHotKeyEvent::receiver();
+        while let Ok(event) = event_receiver.recv() {
+            debug!("{:?}", event);
+            if event.state == HotKeyState::Pressed {
+                let app_event = if event.id == detection_hotkey.id() {
+                    debug!("Detection triggered");
+                    AppEvent::Detection
+                } else if event.id == snapit_hotkey.id() {
+                    debug!("Snap-it triggered");
+                    AppEvent::Snapit
+                } else {
+                    continue;
+                };
+                event_sender.send(app_event).unwrap();
             }
         }
     });
@@ -390,52 +421,6 @@ pub struct Arguments {
     pub ocr_contrast: f32,
 }
 
-fn setup_hotkeys(
-    detection_hotkey: HotKey,
-    snapit_hotkey: HotKey,
-    detection_sender: mpsc::Sender<()>,
-    snapit_sender: mpsc::Sender<()>,
-) -> Result<GlobalHotKeyManager, Box<dyn Error>> {
-    let hotkey_manager = GlobalHotKeyManager::new()?;
-    debug!(
-        "Registering hotkeys - F12: {}, F10: {}",
-        detection_hotkey.id(),
-        snapit_hotkey.id()
-    );
-
-    hotkey_manager.register(detection_hotkey)?;
-    hotkey_manager.register(snapit_hotkey)?;
-
-    let detection_id = detection_hotkey.id();
-    let snapit_id = snapit_hotkey.id();
-
-    // Single thread for handling both hotkeys
-    let receiver = GlobalHotKeyEvent::receiver();
-    thread::spawn(move || {
-        while let Ok(event) = receiver.recv() {
-            if event.state == HotKeyState::Pressed {
-                match event.id {
-                    id if id == detection_id => {
-                        debug!("Detection hotkey pressed");
-                        if let Err(e) = detection_sender.send(()) {
-                            error!("Failed to send detection event: {}", e);
-                        }
-                    }
-                    id if id == snapit_id => {
-                        debug!("Snapit hotkey pressed");
-                        if let Err(e) = snapit_sender.send(()) {
-                            error!("Failed to send snapit event: {}", e);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    });
-
-    Ok(hotkey_manager)
-}
-
 fn main() -> Result<(), Box<dyn Error>> {
     let arguments = Arguments::parse();
     let default_log_path = PathBuf::from_str(&std::env::var("HOME").unwrap()).unwrap().join(PathBuf::from_str(".local/share/Steam/steamapps/compatdata/230410/pfx/drive_c/users/steamuser/AppData/Local/Warframe/EE.log")?);
@@ -475,38 +460,30 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     info!("Loaded database");
 
-    let (detection_sender, detection_receiver) = channel();
-    let (snapit_sender, snapit_receiver) = channel();
+    let (event_sender, event_receiver) = channel();
 
-    log_watcher(log_path.clone(), detection_sender.clone());
-
-    // Setup hotkeys
-    let _hotkey_manager = setup_hotkeys(
+    log_watcher(log_path.clone(), event_sender.clone());
+    
+    setup_hotkeys(
         arguments.detection_hotkey,
         arguments.snapit_hotkey,
-        detection_sender,
-        snapit_sender,
-    )?;
+        event_sender,
+    );
 
-    loop {
-        // Check detection receiver
-        match detection_receiver.try_recv() {
-            Ok(()) => {
-                run_detection(warframe_window, &db, &arguments);
-            }
-            Err(mpsc::TryRecvError::Empty) => {}
-            Err(mpsc::TryRecvError::Disconnected) => break,
-        }
-
-        // Check snapit receiver
-        match snapit_receiver.try_recv() {
-            Ok(()) => {
+    while let Ok(event) = event_receiver.recv() {
+        debug!("Processing event: {:?}", event);
+        match event {
+            AppEvent::Snapit => {
+                info!("Snapping it");
                 run_snapit(warframe_window, &db, &arguments);
             }
-            Err(mpsc::TryRecvError::Empty) => {
-                thread::sleep(Duration::from_millis(arguments.sleep_duration));
+            AppEvent::Detection => {
+                info!("Capturing");
+                run_detection(warframe_window, &db, &arguments)
             }
-            Err(mpsc::TryRecvError::Disconnected) => break,
+            AppEvent::LogTrigger => {
+                run_detection(warframe_window, &db, &arguments)
+            }
         }
     }
 
