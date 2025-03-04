@@ -2,6 +2,3 @@
 *.png
 filtered_items.json
 prices.json
-*.nix
-.envrc
-.direnv
