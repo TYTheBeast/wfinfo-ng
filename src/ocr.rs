@@ -84,9 +84,8 @@ pub fn extract_part(
     let rgb = cropped.into_rgb8();
     let brightened = colorops::brighten(&rgb, brightness);
     let enhanced = colorops::contrast(&brightened, contrast);
-    let enhanced = DynamicImage::ImageRgb8(enhanced);
-
-    enhanced
+    
+    DynamicImage::ImageRgb8(enhanced)
 }
 
 /// Performs OCR on an image using Tesseract

@@ -101,10 +101,19 @@ fn run_snapit(window: &Window, db: &Database, arguments: &Arguments) -> Option<S
     debug!("Captured window image");
 
     // Run slop to get the selection
-    let slop_output = Command::new("slop")
+    let slop_output = match Command::new("slop")
         .args(["-b", "3", "-c", "1,0,0,0.8"])
-        .output()
-        .ok()?;
+        .output() {
+            Ok(output) => output,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                error!("Could not find 'slop' command. Please install slop using your system package manager (e.g., 'sudo apt install slop' or 'nix-env -iA slop')");
+                return None;
+            }
+            Err(e) => {
+                error!("Failed to run slop: {}", e);
+                return None;
+            }
+    };
     let slop_output = String::from_utf8_lossy(&slop_output.stdout);
     debug!("Slop output: {}", slop_output);
 
